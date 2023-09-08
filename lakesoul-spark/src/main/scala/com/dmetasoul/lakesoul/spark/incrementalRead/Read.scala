@@ -23,8 +23,6 @@ object Read {
       .config("spark.sql.extensions", "com.dmetasoul.lakesoul.sql.LakeSoulSparkSessionExtensio")
       .getOrCreate()
 
-    LakeSoulTable.forPath(tablePath).toDF.show()
-
     val lake1 = LakeSoulTable.forPathIncremental(tablePath, "", statTime, endTime)
 
     lake1.toDF.createTempView("table")
