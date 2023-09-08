@@ -29,28 +29,28 @@ object Read {
 
     spark.sql(
       """
-        |select col4,sum(col5),sum(col6),sum(col7) from test_table group by col4;
+        |select col4,sum(col5),sum(col6),sum(col7) from table group by col4;
         |""".stripMargin).show(100)
 
     spark.sql(
       """
-        |select col4,max(col5),max(col6),min(col7),count(16) from test_table
+        |select col4,max(col5),max(col6),min(col7),count(16) from table
         |group by col4;
         |""".stripMargin).show(100)
 
     spark.sql(
       """
-        |select * from test_table order by col3,id;
+        |select * from table order by col3,id;
         |""".stripMargin).show(100)
 
     spark.sql(
       """
-        |select * from test_table where id<100000000;
+        |select * from table where id<100000000;
         |""".stripMargin).show(100)
 
     spark.sql(
       """
-        |select distinct col3 from test_table order by col3;
+        |select distinct col3 from table order by col3;
         |""".stripMargin).show(100)
 
     spark.close()
