@@ -8,17 +8,23 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.dmetasoul.lakesoul.lakesoul.io.NativeIOBase;
 import com.dmetasoul.lakesoul.meta.*;
+import com.dmetasoul.lakesoul.meta.dao.TableInfoDao;
 import com.dmetasoul.lakesoul.meta.entity.TableInfo;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.runtime.fs.hdfs.HadoopFileSystem;
 import org.apache.flink.runtime.util.HadoopUtils;
 import org.apache.flink.table.api.*;
 import org.apache.flink.table.api.Schema.Builder;
 import org.apache.flink.table.api.config.TableConfigOptions;
+import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.CatalogPartitionSpec;
 import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.exceptions.CatalogException;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
@@ -27,8 +33,11 @@ import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
 import org.apache.flink.types.RowKind;
+import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -43,7 +52,6 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import static com.dmetasoul.lakesoul.meta.DBConfig.LAKESOUL_RANGE_PARTITION_SPLITTER;
 import static java.time.ZoneId.SHORT_IDS;
 import static org.apache.flink.lakesoul.tool.LakeSoulSinkOptions.*;
 import static org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM;
@@ -66,6 +74,75 @@ public class FlinkUtil {
 
     public static String getRangeValue(CatalogPartitionSpec cps) {
         return "Null";
+    }
+
+    public static org.apache.arrow.vector.types.pojo.Schema toArrowSchema(RowType rowType, Optional<String> cdcColumn) throws CatalogException {
+        List<Field> fields = new ArrayList<>();
+        String cdcColName = null;
+        if (cdcColumn.isPresent()) {
+            cdcColName = cdcColumn.get();
+            Field cdcField = ArrowUtils.toArrowField(cdcColName, new VarCharType(false, 16));
+            fields.add(cdcField);
+        }
+
+        for (RowType.RowField field : rowType.getFields()) {
+            String name = field.getName();
+            if (name.equals(SORT_FIELD)) continue;
+
+            LogicalType logicalType = field.getType();
+            Field arrowField = ArrowUtils.toArrowField(name, logicalType);
+            if (name.equals(cdcColName)) {
+                if (!arrowField.toString().equals(fields.get(0).toString())) {
+                    throw new CatalogException(CDC_CHANGE_COLUMN +
+                            "=" +
+                            cdcColName +
+                            "has an invalid field of" +
+                            field +
+                            "," +
+                            CDC_CHANGE_COLUMN +
+                            " require field of " +
+                            fields.get(0).toString());
+                }
+            } else {
+                fields.add(arrowField);
+            }
+        }
+        return new org.apache.arrow.vector.types.pojo.Schema(fields);
+    }
+
+    public static org.apache.arrow.vector.types.pojo.Schema toArrowSchema(TableSchema tsc, Optional<String> cdcColumn) throws CatalogException {
+        List<Field> fields = new ArrayList<>();
+        String cdcColName = null;
+        if (cdcColumn.isPresent()) {
+            cdcColName = cdcColumn.get();
+            Field cdcField = ArrowUtils.toArrowField(cdcColName, new VarCharType(false, 16));
+            fields.add(cdcField);
+        }
+
+        for (int i = 0; i < tsc.getFieldCount(); i++) {
+            String name = tsc.getFieldName(i).get();
+            DataType dt = tsc.getFieldDataType(i).get();
+            if (name.equals(SORT_FIELD)) continue;
+
+            LogicalType logicalType = dt.getLogicalType();
+            Field arrowField = ArrowUtils.toArrowField(name, logicalType);
+            if (name.equals(cdcColName)) {
+                if (!arrowField.toString().equals(fields.get(0).toString())) {
+                    throw new CatalogException(CDC_CHANGE_COLUMN +
+                            "=" +
+                            cdcColName +
+                            "has an invalid field of" +
+                            arrowField +
+                            "," +
+                            CDC_CHANGE_COLUMN +
+                            " require field of " +
+                            fields.get(0).toString());
+                }
+            } else {
+                fields.add(arrowField);
+            }
+        }
+        return new org.apache.arrow.vector.types.pojo.Schema(fields);
     }
 
     public static StructType toSparkSchema(RowType rowType, Optional<String> cdcColumn) throws CatalogException {
@@ -194,14 +271,40 @@ public class FlinkUtil {
         return StringData.fromString("delete").equals(operation);
     }
 
-    public static CatalogTable toFlinkCatalog(TableInfo tableInfo) {
+    public static boolean isView(TableInfo tableInfo) {
+        JSONObject jsb = DBUtil.stringToJSON(tableInfo.getProperties());
+        if (jsb.containsKey(LAKESOUL_VIEW.key()) && "true".equals(jsb.getString(LAKESOUL_VIEW.key())) && LAKESOUL_VIEW_KIND.equals(jsb.getString(LAKESOUL_VIEW_TYPE.key()))) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    public static boolean isTable(TableInfo tableInfo) {
+        JSONObject jsb = DBUtil.stringToJSON(tableInfo.getProperties());
+        if (jsb.containsKey(LAKESOUL_VIEW.key()) && "true".equals(jsb.getString(LAKESOUL_VIEW.key()))) {
+            return false;
+        } else {
+            return true;
+        }
+    }
+
+    public static CatalogBaseTable toFlinkCatalog(TableInfo tableInfo) {
         String tableSchema = tableInfo.getTableSchema();
         JSONObject properties = JSON.parseObject(tableInfo.getProperties());
 
-        StructType struct = (StructType) org.apache.spark.sql.types.DataType.fromJson(tableSchema);
-        org.apache.arrow.vector.types.pojo.Schema
-                arrowSchema =
-                org.apache.spark.sql.arrow.ArrowUtils.toArrowSchema(struct, ZoneId.of("UTC").toString());
+        org.apache.arrow.vector.types.pojo.Schema arrowSchema = null;
+        System.out.println(tableSchema);
+        if (TableInfoDao.isArrowKindSchema(tableSchema)) {
+            try {
+                arrowSchema = org.apache.arrow.vector.types.pojo.Schema.fromJSON(tableSchema);
+            } catch (IOException e) {
+                throw new CatalogException(e);
+            }
+        } else {
+            StructType struct = (StructType) org.apache.spark.sql.types.DataType.fromJson(tableSchema);
+            arrowSchema = org.apache.spark.sql.arrow.ArrowUtils.toArrowSchema(struct, ZoneId.of("UTC").toString());
+        }
         RowType rowType = ArrowUtils.fromArrowSchema(arrowSchema);
         Builder bd = Schema.newBuilder();
 
@@ -221,7 +324,12 @@ public class FlinkUtil {
         List<String> parKeys = partitionKeys.rangeKeys;
         HashMap<String, String> conf = new HashMap<>();
         properties.forEach((key, value) -> conf.put(key, (String) value));
-        return CatalogTable.of(bd.build(), "", parKeys, conf);
+        if (FlinkUtil.isView(tableInfo)) {
+            return CatalogView.of(bd.build(), "", properties.getString(VIEW_ORIGINAL_QUERY), properties.getString(VIEW_EXPANDED_QUERY), conf);
+        } else {
+            return CatalogTable.of(bd.build(), "", parKeys, conf);
+
+        }
     }
 
     public static String generatePartitionPath(LinkedHashMap<String, String> partitionSpec) {
@@ -378,11 +486,11 @@ public class FlinkUtil {
             List<String> partitionDescs = remainingPartitions.stream()
                     .map(DBUtil::formatPartitionDesc)
                     .collect(Collectors.toList());
-            List<PartitionInfo> partitionInfos = new ArrayList<>();
+            List<PartitionInfoScala> partitionInfos = new ArrayList<>();
             for (String partitionDesc : partitionDescs) {
                 partitionInfos.add(MetaVersion.getSinglePartitionInfo(tif.getTableId(), partitionDesc, ""));
             }
-            PartitionInfo[] ptinfos = partitionInfos.toArray(new PartitionInfo[0]);
+            PartitionInfoScala[] ptinfos = partitionInfos.toArray(new PartitionInfoScala[0]);
             return DataOperation.getTableDataInfo(ptinfos);
         }
     }
@@ -406,8 +514,12 @@ public class FlinkUtil {
     }
 
     public static DataFileInfo[] getSinglePartitionDataFileInfo(TableInfo tif, String partitionDesc) {
-        PartitionInfo partitionInfo = MetaVersion.getSinglePartitionInfo(tif.getTableId(), partitionDesc, "");
-        return DataOperation.getTableDataInfo(new PartitionInfo[]{partitionInfo});
+        PartitionInfoScala partitionInfo = MetaVersion.getSinglePartitionInfo(tif.getTableId(), partitionDesc, "");
+        return DataOperation.getTableDataInfo(new PartitionInfoScala[]{partitionInfo});
+    }
+
+    public static int[] getFieldPositions(String[] fields, List<String> allFields) {
+        return Arrays.stream(fields).mapToInt(allFields::indexOf).toArray();
     }
 
     public static TableEnvironment createTableEnvInBatchMode(SqlDialect dialect) {
@@ -466,5 +578,54 @@ public class FlinkUtil {
         map.put(HASH_BUCKET_NUM.key(), String.valueOf(conf.getInteger(BUCKET_PARALLELISM)));
         map.put(CDC_CHANGE_COLUMN, conf.getString(CDC_CHANGE_COLUMN, CDC_CHANGE_COLUMN_DEFAULT));
         return new JSONObject(map);
+    }
+
+    public static boolean hasHdfsClasses() {
+        try {
+            FlinkUtil.class.getClassLoader().loadClass("org.apache.flink.runtime.fs.hdfs.HadoopFileSystem");
+            FlinkUtil.class.getClassLoader().loadClass("org.apache.hadoop.hdfs.DistributedFileSystem");
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+    }
+
+    public static boolean hasS3Classes() {
+        try {
+            FlinkUtil.class.getClassLoader().loadClass("org.apache.flink.fs.s3.common.FlinkS3FileSystem");
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+    }
+
+    public static void createAndSetTableDirPermission(Path p) throws IOException {
+        // TODO: move these to native io
+        // currently we only support setting owner and permission for HDFS.
+        // S3 support will be added later
+        if (!hasHdfsClasses()) return;
+
+        FileSystem fs = p.getFileSystem();
+        if (fs instanceof HadoopFileSystem) {
+            String userName = DBUtil.getUser();
+            String domain = DBUtil.getDomain();
+            if (userName == null || domain.equals("public")) return;
+
+            HadoopFileSystem hfs = (HadoopFileSystem) fs;
+            org.apache.hadoop.fs.FileSystem hdfs = hfs.getHadoopFileSystem();
+            org.apache.hadoop.fs.Path nsDir = HadoopFileSystem.toHadoopPath(p.getParent());
+            if (!hdfs.exists(nsDir)) {
+                hdfs.mkdirs(nsDir);
+                hdfs.setOwner(nsDir, userName, domain);
+                hdfs.setPermission(nsDir, new FsPermission(FsAction.ALL, FsAction.ALL, FsAction.NONE));
+            }
+            org.apache.hadoop.fs.Path tbDir = HadoopFileSystem.toHadoopPath(p);
+            if (hdfs.exists(tbDir)) {
+                throw new IOException("Table directory already exists: " + tbDir.toString());
+            }
+            hdfs.mkdirs(tbDir);
+            hdfs.setOwner(tbDir, userName, domain);
+            hdfs.setPermission(tbDir, new FsPermission(FsAction.ALL, FsAction.READ_EXECUTE, FsAction.NONE));
+        }
     }
 }

@@ -4,21 +4,22 @@
 
 package org.apache.spark.sql.lakesoul
 
-import com.dmetasoul.lakesoul.meta.CommitType
+import com.dmetasoul.lakesoul.meta.{CommitType, DataFileInfo}
 import com.dmetasoul.lakesoul.meta.DBConfig.LAKESOUL_RANGE_PARTITION_SPLITTER
 import org.apache.hadoop.fs.Path
-import org.apache.spark.sql.Dataset
+import org.apache.spark.sql.{Column, Dataset}
 import org.apache.spark.sql.catalyst.catalog.BucketSpec
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference, CaseWhen, EqualNullSafe, EqualTo, Literal, Not}
+import org.apache.spark.sql.catalyst.plans.logical.Filter
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, FileFormatWriter, WriteJobStatsTracker}
-import org.apache.spark.sql.execution.{QueryExecution, SQLExecution}
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.execution.{FilterExec, ProjectExec, QueryExecution, SQLExecution}
+import org.apache.spark.sql.functions.{col, expr, lit}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.lakesoul.exception.LakeSoulErrors
 import org.apache.spark.sql.lakesoul.schema.{InvariantCheckerExec, Invariants, SchemaUtils}
 import org.apache.spark.sql.lakesoul.sources.LakeSoulSQLConf
-import org.apache.spark.sql.lakesoul.utils.{DataFileInfo, SparkUtil}
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.lakesoul.utils.SparkUtil
+import org.apache.spark.sql.types.{BooleanType, StringType, StructType}
 import org.apache.spark.util.SerializableConfiguration
 
 import scala.collection.mutable
@@ -145,7 +146,20 @@ trait TransactionalWrite {
         output)
 
       val physicalPlan = if (isCompaction) {
-        queryExecution.executedPlan
+        val cdcCol = snapshot.getTableInfo.configuration.get(LakeSoulTableProperties.lakeSoulCDCChangePropKey)
+        if (cdcCol.nonEmpty) {
+          val tmpSparkPlan = queryExecution.executedPlan
+          val outColumns = outputSpec.outputColumns
+          val cdcAttrCol = outColumns.filter(p => p.name.equalsIgnoreCase(cdcCol.get))
+          val pos = outColumns.indexOf(cdcAttrCol(0))
+          val cdcCaseWhen = CaseWhen.createFromParser(Seq(EqualTo(cdcAttrCol(0), Literal("update")), Literal("insert"), cdcAttrCol(0)))
+          val alias = Alias(cdcCaseWhen, cdcCol.get)()
+          val allAttrCols = outColumns.updated(pos, alias)
+          val filterCdcAdd = FilterExec(Not(EqualTo(cdcAttrCol(0), Literal("delete"))), tmpSparkPlan)
+          ProjectExec(allAttrCols, filterCdcAdd)
+        } else {
+          queryExecution.executedPlan
+        }
       } else {
         InvariantCheckerExec(queryExecution.executedPlan, invariants)
       }

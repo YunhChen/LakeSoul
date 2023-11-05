@@ -51,7 +51,7 @@ pub struct LakeSoulIOConfig {
     // write row group max row num
     #[derivative(Default(value = "250000"))]
     pub(crate) max_row_group_size: usize,
-    #[derivative(Default(value = "2"))]
+    #[derivative(Default(value = "1"))]
     pub(crate) prefetch_size: usize,
 
     // arrow schema
@@ -74,7 +74,21 @@ pub struct LakeSoulIOConfig {
     pub(crate) default_fs: String,
 }
 
-#[derive(Derivative)]
+impl LakeSoulIOConfig {
+    pub fn schema(&self) -> SchemaRef {
+        self.schema.0.clone()
+    }
+
+    pub fn primary_keys_slice(&self) -> &[String] {
+        &self.primary_keys
+    }
+
+    pub fn files_slice(&self) -> &[String] {
+        &self.files
+    }
+}
+
+#[derive(Derivative, Debug)]
 #[derivative(Clone, Default)]
 pub struct LakeSoulIOConfigBuilder {
     config: LakeSoulIOConfig,
@@ -310,11 +324,13 @@ fn register_object_store(path: &str, config: &mut LakeSoulIOConfig, runtime: &Ru
 pub fn create_session_context(config: &mut LakeSoulIOConfig) -> Result<SessionContext> {
     let mut sess_conf = SessionConfig::default()
         .with_batch_size(config.batch_size)
-        .with_parquet_pruning(false)
+        .with_parquet_pruning(true)
         .with_prefetch(config.prefetch_size);
 
     sess_conf.options_mut().optimizer.enable_round_robin_repartition = false; // if true, the record_batches poll from stream become unordered
     sess_conf.options_mut().optimizer.prefer_hash_join = false; //if true, panicked at 'range end out of bounds'
+    sess_conf.options_mut().execution.parquet.pushdown_filters = true;
+    // sess_conf.options_mut().execution.parquet.enable_page_index = true;
 
     // limit memory for sort writer
     let runtime = RuntimeEnv::new(RuntimeConfig::new().with_memory_limit(128 * 1024 * 1024, 1.0))?;

@@ -5,19 +5,21 @@
 package org.apache.spark.sql.lakesoul.commands
 
 import com.dmetasoul.lakesoul.meta.DBConfig.LAKESOUL_RANGE_PARTITION_SPLITTER
-import com.dmetasoul.lakesoul.meta.MetaVersion
+import com.dmetasoul.lakesoul.meta.{DataFileInfo, SparkMetaVersion}
 import org.apache.hadoop.fs.Path
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql._
+import org.apache.spark.sql.arrow.ArrowUtils
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.lakesoul.catalog.LakeSoulCatalog
 import org.apache.spark.sql.lakesoul.exception.LakeSoulErrors
 import org.apache.spark.sql.lakesoul.schema.SchemaUtils
-import org.apache.spark.sql.lakesoul.utils.{DataFileInfo, SparkUtil, TableInfo}
+import org.apache.spark.sql.lakesoul.utils.{SparkUtil, TableInfo}
 import org.apache.spark.sql.lakesoul.{LakeSoulOptions, LakeSoulTableProperties, SnapshotManagement, TransactionCommit}
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.vectorized.NativeIOUtils
 
 import java.net.URI
 
@@ -89,6 +91,7 @@ case class CreateTableCommand(var table: CatalogTable,
     val isManagedTable = tableWithLocation.tableType == CatalogTableType.MANAGED
     val tableLocation = new Path(tableWithLocation.location)
     val modifiedPath = SparkUtil.makeQualifiedTablePath(tableLocation)
+    NativeIOUtils.createAndSetTableDirPermission(modifiedPath, sparkSession.sessionState.newHadoopConf())
 
     // external options to store replace and partition properties
     var externalOptions = Map.empty[String, String]
@@ -113,7 +116,7 @@ case class CreateTableCommand(var table: CatalogTable,
     val tc = snapshotManagement.startTransaction()
 
     val shortTableName = table.identifier.table
-    if (MetaVersion.isShortTableNameExists(shortTableName, table.database)._1) {
+    if (SparkMetaVersion.isShortTableNameExists(shortTableName, table.database)._1) {
       throw LakeSoulErrors.tableExistsException(shortTableName)
     } else {
       tc.setShortTableName(shortTableName)
@@ -165,7 +168,7 @@ case class CreateTableCommand(var table: CatalogTable,
           assertPathEmpty(sparkSession, tableWithLocation)
           // This is a user provided schema.
           // Doesn't come from a query, Follow nullability invariants.
-          val newTableInfo = getProvidedTableInfo(tc, table, table.schema.json)
+          val newTableInfo = getProvidedTableInfo(tc, table, ArrowUtils.toArrowSchema(table.schema).toJson)
 
           tc.commit(Seq.empty[DataFileInfo], Seq.empty[DataFileInfo], newTableInfo)
         } else {
@@ -201,17 +204,7 @@ case class CreateTableCommand(var table: CatalogTable,
           tc.commit(Seq.empty[DataFileInfo], removes)
       }
     }
-
-    //    val tableWithDefaultOptions = tableWithLocation.copy(
-    //      schema = new StructType(),
-    //      partitionColumnNames = Nil,
-    //      tracksPartitionsInCatalog = true
-    //    )
-
-    //    updateCatalog(sparkSession, tableWithDefaultOptions)
-
     Nil
-
   }
 
   private def getProvidedTableInfo(tc: TransactionCommit,

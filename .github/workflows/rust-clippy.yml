@@ -5,18 +5,18 @@
 on:
   push:
     paths:
-      - "native-io/**"
+      - "rust/**"
     branches:
       - 'main'
   pull_request:
     paths:
-      - "native-io/**"
+      - "rust/**"
     branches:
       - 'main'
       - 'release/**'
   workflow_dispatch:
 
-name: Clippy check
+name: Rust Clippy Check
 
 # Make sure CI fails on all warnings, including Clippy lints
 env:

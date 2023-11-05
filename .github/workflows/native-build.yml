@@ -78,6 +78,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./rust -> target"
+          env-vars: "JAVA_HOME"
       - uses: actions-rs/cargo@v1
         with:
           command: build
@@ -179,5 +180,6 @@ jobs:
           path: |
             lakesoul-spark/target/lakesoul-spark-*.jar
             lakesoul-flink/target/lakesoul-flink-*.jar
+            lakesoul-presto/target/lakesoul-presto-*.jar
           retention-days: 3
           if-no-files-found: error

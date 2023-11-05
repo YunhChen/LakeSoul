@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![feature(io_error_other)]
-#![feature(split_array)]
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -14,6 +13,9 @@ pub use tokio::runtime::{Builder, Runtime};
 
 pub use tokio_postgres::{NoTls, Client, Statement};
 use postgres_types::{ToSql, FromSql};
+
+mod metadata_client;
+pub use metadata_client::MetaDataClient;
 
 pub const DAO_TYPE_QUERY_ONE_OFFSET : i32 = 0;
 pub const DAO_TYPE_QUERY_LIST_OFFSET : i32 = 100;
@@ -217,7 +219,7 @@ fn get_prepared_statement(
                 // Select PartitionInfo
                 DaoType::SelectPartitionVersionByTableIdAndDescAndVersion =>
                     "select table_id, partition_desc, version, commit_op, snapshot, expression, domain 
-                    from partition_info from partition_info 
+                    from partition_info
                     where table_id = $1::TEXT and partition_desc = $2::TEXT and version = $3::INT",
                 DaoType::SelectOnePartitionVersionByTableIdAndDesc =>
                     "select m.table_id, t.partition_desc, m.version, m.commit_op, m.snapshot, m.expression, m.domain from (
@@ -688,7 +690,7 @@ pub fn execute_query(
                     .map(|row|proto::proto::entity::Namespace { 
                         namespace: row.get(0), 
                         properties: row.get::<_, serde_json::Value>(1).to_string(), 
-                        comment: row.get(2), 
+                        comment: row.get::<_, Option<String>>(2).unwrap_or(String::from("")), 
                         domain: row.get(3)
                     })
                     .collect();
@@ -735,7 +737,7 @@ pub fn execute_query(
                                         })
                                         .collect::<Vec<entity::Uuid>>(), 
                             timestamp: row.get::<_, i64>(5), 
-                            expression: row.get(6),
+                            expression: row.get::<_, Option<String>>(6).unwrap_or(String::from("")),
                             domain: row.get(7),
                         }
                     })
@@ -763,7 +765,7 @@ pub fn execute_query(
                                             entity::Uuid{high, low}
                                         })
                                         .collect::<Vec<entity::Uuid>>(), 
-                            expression: row.get(5),
+                            expression: row.get::<_, Option<String>>(5).unwrap_or(String::from("")),
                             domain: row.get(6),
                             ..Default::default() 
                         }
@@ -1287,7 +1289,7 @@ pub fn execute_query_scalar(
             });
             match result {
                 Ok(Some(row)) => {
-                    let ts = row.get::<_, Option<i64>>(0);
+                    let ts = row.get::<_, Option<i32>>(0);
                     match ts {
                         Some(ts) => Ok(Some(format!("{}", ts))),
                         None => Ok(None)

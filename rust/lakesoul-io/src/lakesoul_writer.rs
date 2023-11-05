@@ -31,7 +31,7 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
-use std::io::ErrorKind::ResourceBusy;
+use std::io::ErrorKind::AddrInUse;
 use std::io::Write;
 use std::sync::Arc;
 use tokio::io::AsyncWrite;
@@ -89,7 +89,7 @@ impl Write for InMemBuf {
         let mut v = self
             .0
             .try_borrow_mut()
-            .map_err(|_| std::io::Error::from(ResourceBusy))?;
+            .map_err(|_| std::io::Error::from(AddrInUse))?;
         v.extend(buf);
         Ok(buf.len())
     }
@@ -104,7 +104,7 @@ impl Write for InMemBuf {
         let mut v = self
             .0
             .try_borrow_mut()
-            .map_err(|_| std::io::Error::from(ResourceBusy))?;
+            .map_err(|_| std::io::Error::from(AddrInUse))?;
         v.extend(buf);
         Ok(())
     }
@@ -167,11 +167,11 @@ impl ExecutionPlan for ReceiverStreamExec {
 
 impl MultiPartAsyncWriter {
     pub async fn try_new(mut config: LakeSoulIOConfig) -> Result<Self> {
-        if config.files.len() != 1 {
+        if config.files.is_empty() {
             return Err(Internal("wrong number of file names provided for writer".to_string()));
         }
         let sess_ctx = create_session_context(&mut config)?;
-        let file_name = &config.files[0];
+        let file_name = &config.files.last().unwrap();
 
         // local style path should have already been handled in create_session_context,
         // so we don't have to deal with ParseError::RelativeUrlWithoutBase here
